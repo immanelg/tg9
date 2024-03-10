@@ -3,11 +3,12 @@ mod tui;
 
 use std::time::Duration;
 
-use grammers_client::Client;
-use std::sync::Arc;
 use anyhow::Result;
 use crossterm::event::KeyCode::Char;
+use grammers_client::types::{Dialog, Message};
+use grammers_client::{Client, Update};
 use ratatui::{prelude::*, widgets::*};
+use std::sync::Arc;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tui::Event;
 
@@ -22,17 +23,32 @@ pub fn setup_panic_handler() {
 
 type Id = i64;
 
-struct Dialog {
-    id: Id,
-    name: String,
-    // last message, messages, etc
-}
-
+// struct Dialog {
+//     id: Id,
+//     name: String,
+//     // last message, messages, etc
+// }
+//
 struct App {
     should_quit: bool,
     action_tx: UnboundedSender<Action>,
     counter: i64,
     dialogs: Vec<Dialog>,
+    messages: Vec<Message>,
+    active_chat_id: Option<Id>,
+}
+
+impl App {
+    fn new(action_tx: UnboundedSender<Action>) -> Self {
+        App {
+            should_quit: false,
+            action_tx,
+            counter: 0,
+            dialogs: Vec::new(),
+            messages: Vec::new(),
+            active_chat_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +59,8 @@ pub enum Action {
     Tick,
     Down,
     Up,
-    Dialog { id: Id, name: String},
+    Dialog(Dialog),
+    Message(Message),
 }
 
 impl Action {
@@ -66,12 +83,17 @@ impl Action {
 fn ui(frame: &mut Frame, app: &mut App) {
     let area = frame.size();
 
-    let items =
-        app
-            .dialogs
-            .iter()
-            .map(|d| format!("{} {}", d.id, d.name))
-            .map(ListItem::new);
+    let items = app
+        .dialogs
+        .iter()
+        .map(|d| {
+            format!(
+                "{} {}",
+                d.chat().name(),
+                d.last_message.as_ref().map(|m| m.text()).unwrap_or("")
+            )
+        })
+        .map(ListItem::new);
     let list = List::new(items)
         .block(Block::default().title("List").borders(Borders::ALL))
         .style(Style::default().fg(Color::White))
@@ -100,10 +122,11 @@ fn update(app: &mut App, action: Action) {
         //     });
         // }
         Action::Quit => app.should_quit = true,
-        Action::Dialog { id, name } => {
+        Action::Dialog(dialog) => {
             // this should probably be a hashmap, etc
-            app.dialogs.push(Dialog { id, name });
+            app.dialogs.push(dialog);
         }
+        Action::Message(message) => {}
         Action::None => {}
         Action::Tick => {}
         Action::Render => {}
@@ -112,14 +135,31 @@ fn update(app: &mut App, action: Action) {
     };
 }
 
-
-async fn init_state(app: &App, client: Arc<Client>) {
+fn init_state(app: &App, client: Client) {
     let action_tx = app.action_tx.clone();
     tokio::spawn(async move {
         let mut dialogs = client.iter_dialogs();
         while let Some(dialog) = dialogs.next().await.unwrap() {
-            let chat = dialog.chat();
-            action_tx.send(Action::Dialog { name: chat.name().to_string(), id: chat.id() }).unwrap();
+            action_tx.send(Action::Dialog(dialog)).unwrap();
+        }
+    });
+}
+
+fn listen_updates(app: &App, client: Client) {
+    let action_tx = app.action_tx.clone();
+    tokio::spawn(async move {
+        while let Some(update) = client.next_update().await.unwrap() {
+            match update {
+                Update::NewMessage(mut message) if !message.outgoing() => {
+                    // TODO: maybe use these types directly for simplicity
+                    action_tx.send(Action::Message(message)).unwrap();
+                    // action_tx.send(message)
+                    // message.respond(message.text()).await?;
+                }
+                Update::MessageDeleted(del) => {}
+                Update::MessageEdited(message) => {}
+                _ => {}
+            }
         }
     });
 }
@@ -127,7 +167,7 @@ async fn init_state(app: &App, client: Arc<Client>) {
 async fn run() -> Result<()> {
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
-    let mut client = Arc::new(api::login().await?);
+    let mut client = api::login().await?;
 
     let mut tui = tui::Tui::new()?
         .tick_rate(1.0)
@@ -136,14 +176,10 @@ async fn run() -> Result<()> {
         .paste(true);
     tui.enter()?;
 
-    let mut app = App {
-        should_quit: false,
-        action_tx: action_tx.clone(),
-        counter: 0,
-        dialogs: Vec::new(),
-    };
+    let mut app = App::new(action_tx.clone());
 
-    init_state(&app, Arc::clone(&client)).await;
+    init_state(&app, client.clone());
+    listen_updates(&app, client.clone());
 
     loop {
         if let Some(e) = tui.next().await {
@@ -151,7 +187,7 @@ async fn run() -> Result<()> {
                 tui::Event::Quit => action_tx.send(Action::Quit)?,
                 tui::Event::Tick => action_tx.send(Action::Tick)?,
                 tui::Event::Render => action_tx.send(Action::Render)?,
-                tui::Event::Key(_) =>  action_tx.send(Action::from_event(&app, e))?,
+                tui::Event::Key(_) => action_tx.send(Action::from_event(&app, e))?,
                 _ => {}
             }
         };

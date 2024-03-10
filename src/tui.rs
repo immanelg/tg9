@@ -1,8 +1,8 @@
+use anyhow::Result;
 use std::{
     ops::{Deref, DerefMut},
     time::Duration,
 };
-use anyhow::Result;
 
 use crossterm::{
     cursor,
@@ -217,9 +217,7 @@ impl Tui {
     }
 
     pub async fn next(&mut self) -> Option<Event> {
-        self.event_rx
-            .recv()
-            .await
+        self.event_rx.recv().await
     }
 }
 

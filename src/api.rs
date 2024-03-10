@@ -6,7 +6,7 @@ use tokio;
 use std::io::{self, BufRead};
 
 static API_ID: &str = env!("TG9_API_ID");
-static API_HASH: & str = env!("TG9_API_HASH");
+static API_HASH: &str = env!("TG9_API_HASH");
 
 fn read_prompt(prompt: &str) -> String {
     println!("{}", prompt);
@@ -22,7 +22,8 @@ pub async fn login() -> Result<Client> {
         api_id: API_ID.parse().expect("API ID should be valid i32"),
         api_hash: API_HASH.to_string(),
         params: Default::default(),
-    }).await?;
+    })
+    .await?;
 
     if !client.is_authorized().await.unwrap() {
         let phone = read_prompt("Phone number:");
@@ -30,16 +31,20 @@ pub async fn login() -> Result<Client> {
         let token = client.request_login_code(&phone).await.unwrap();
         let code = read_prompt("Code: ");
 
-        let user = match client.sign_in(&token, &code).await {
+        let _user = match client.sign_in(&token, &code).await {
             Ok(user) => {
-                client.session().save_to_file("hello-world.session").unwrap();
+                client
+                    .session()
+                    .save_to_file("hello-world.session")
+                    .unwrap();
                 println!("{:?}", user);
-                user
-            },
+            }
             Err(SignInError::PasswordRequired(_token)) => {
                 unimplemented!("Please provide a password");
             }
-            Err(SignInError::SignUpRequired { terms_of_service: _tos }) => {
+            Err(SignInError::SignUpRequired {
+                terms_of_service: _tos,
+            }) => {
                 unimplemented!("Sign up required");
             }
             Err(err) => {
