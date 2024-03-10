@@ -1,6 +1,6 @@
 # tg9 
 
-A fast and extensible TUI Telegram Client written in Rust.
+A fast and extensible TUI Telegram Client written in Rust (WIP).
 
 # Installation
 
