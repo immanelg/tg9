@@ -1,14 +1,13 @@
 mod api;
 mod tui;
 
-use std::time::Duration;
-
 use anyhow::Result;
 use crossterm::event::KeyCode::Char;
+use futures::SinkExt;
 use grammers_client::types::{Dialog, Message};
 use grammers_client::{Client, Update};
 use ratatui::{prelude::*, widgets::*};
-use std::sync::Arc;
+
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tui::Event;
 
@@ -83,50 +82,38 @@ impl Action {
 fn ui(frame: &mut Frame, app: &mut App) {
     let area = frame.size();
 
-    let items = app
-        .dialogs
-        .iter()
-        .map(|d| {
-            format!(
-                "{} {}",
-                d.chat().name(),
-                d.last_message.as_ref().map(|m| m.text()).unwrap_or("")
-            )
-        })
-        .map(ListItem::new);
-    let list = List::new(items)
-        .block(Block::default().title("List").borders(Borders::ALL))
-        .style(Style::default().fg(Color::White))
-        .highlight_style(Style::default().add_modifier(Modifier::ITALIC))
-        .highlight_symbol(">>")
-        .repeat_highlight_symbol(true)
-        .direction(ListDirection::BottomToTop);
+    let layout = Layout::default()
+        .constraints(vec![
+            Constraint::Percentage(25), Constraint::Percentage(75)
+        ])
+        .direction(Direction::Horizontal)
+        .split(area);
 
-    frame.render_widget(list, area);
+    let dialogs_widget = List::new(
+        app.dialogs
+        .iter()
+        .map(|dial| format!("[{}]: {}", dial.chat().name(), dial.last_message.as_ref().map(|m| m.text()).unwrap_or("")))
+        .map(ListItem::new)
+        )
+        .bg(Color::Blue)
+        .block(Block::default().borders(Borders::ALL));
+
+    let active_chat_widget = List::new(["AHAHAHAHAHAH", "LLALLKASSJAKSJAAJJSAJS", "kjhkjasdhfkjashfkjdhsfkjdshafkjhdskjfhkjadshfkjasdhkjdhaskjfhdkjashfkjsdahfkljhfdkjshfkjdashfkjdhskjafhks"])
+        .bg(Color::Green)
+        .block(Block::default().borders(Borders::ALL));
+
+    frame.render_widget(dialogs_widget, layout[0]);
+    frame.render_widget(active_chat_widget, layout[1]);
 }
 
 fn update(app: &mut App, action: Action) {
     match action {
-        // Action::NetworkRequestAndThenIncrement => {
-        //     let tx = app.action_tx.clone();
-        //     tokio::spawn(async move {
-        //         tokio::time::sleep(Duration::from_secs(5)).await; // simulate network request
-        //         tx.send(Action::Increment).unwrap();
-        //     });
-        // }
-        // Action::NetworkRequestAndThenDecrement => {
-        //     let tx = app.action_tx.clone();
-        //     tokio::spawn(async move {
-        //         tokio::time::sleep(Duration::from_secs(5)).await; // simulate network request
-        //         tx.send(Action::Decrement).unwrap();
-        //     });
-        // }
         Action::Quit => app.should_quit = true,
         Action::Dialog(dialog) => {
             // this should probably be a hashmap, etc
             app.dialogs.push(dialog);
         }
-        Action::Message(message) => {}
+        Action::Message(_message) => {}
         Action::None => {}
         Action::Tick => {}
         Action::Render => {}
@@ -150,14 +137,14 @@ fn listen_updates(app: &App, client: Client) {
     tokio::spawn(async move {
         while let Some(update) = client.next_update().await.unwrap() {
             match update {
-                Update::NewMessage(mut message) if !message.outgoing() => {
+                Update::NewMessage(message) if !message.outgoing() => {
                     // TODO: maybe use these types directly for simplicity
                     action_tx.send(Action::Message(message)).unwrap();
                     // action_tx.send(message)
                     // message.respond(message.text()).await?;
                 }
-                Update::MessageDeleted(del) => {}
-                Update::MessageEdited(message) => {}
+                Update::MessageDeleted(_del) => {}
+                Update::MessageEdited(_message) => {}
                 _ => {}
             }
         }
@@ -167,7 +154,7 @@ fn listen_updates(app: &App, client: Client) {
 async fn run() -> Result<()> {
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
-    let mut client = api::login().await?;
+    let client = api::login().await?;
 
     let mut tui = tui::Tui::new()?
         .tick_rate(1.0)
