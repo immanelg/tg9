@@ -3,7 +3,7 @@ mod tui;
 
 use std::time::Duration;
 
-use grammers_client::{Client, Config, SignInError};
+use grammers_client::Client;
 use std::sync::Arc;
 use anyhow::Result;
 use crossterm::event::KeyCode::Char;
@@ -41,8 +41,8 @@ pub enum Action {
     Render,
     None,
     Tick,
-    Increment,
-    Decrement,
+    Down,
+    Up,
     Dialog { id: Id, name: String},
 }
 
@@ -53,8 +53,8 @@ impl Action {
             Event::Tick => Action::Tick,
             Event::Render => Action::Render,
             Event::Key(key) => match key.code {
-                Char('j') => Action::Increment,
-                Char('k') => Action::Decrement,
+                Char('j') => Action::Down,
+                Char('k') => Action::Up,
                 Char('q') => Action::Quit,
                 _ => Action::None,
             },
@@ -85,12 +85,6 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
 fn update(app: &mut App, action: Action) {
     match action {
-        Action::Increment => {
-            app.counter += 1;
-        }
-        Action::Decrement => {
-            app.counter -= 1;
-        }
         // Action::NetworkRequestAndThenIncrement => {
         //     let tx = app.action_tx.clone();
         //     tokio::spawn(async move {
@@ -113,6 +107,8 @@ fn update(app: &mut App, action: Action) {
         Action::None => {}
         Action::Tick => {}
         Action::Render => {}
+        Action::Up => {}
+        Action::Down => {}
     };
 }
 
@@ -125,7 +121,6 @@ async fn init_state(app: &App, client: Arc<Client>) {
             let chat = dialog.chat();
             action_tx.send(Action::Dialog { name: chat.name().to_string(), id: chat.id() }).unwrap();
         }
-        // tx.send(dialog.last_message())
     });
 }
 
