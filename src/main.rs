@@ -1,14 +1,15 @@
+mod screen;
 mod api;
-mod tui;
 
 use anyhow::Result;
 use crossterm::event::KeyCode::Char;
-use grammers_client::types::{Dialog, Message};
+use grammers_client::types::iter_buffer::InvocationError;
+use grammers_client::types::{Dialog, Message, Chat};
 use grammers_client::{Client, Update};
 use ratatui::{prelude::*, widgets::*};
 
 use tokio::sync::mpsc::{self, UnboundedSender};
-use tui::TermEvent;
+use screen::ScreenEvent;
 
 pub fn setup_panic_handler() {
     let original_hook = std::panic::take_hook();
@@ -37,7 +38,6 @@ impl View {
 
 struct App {
     quit: bool,
-    action_tx: UnboundedSender<Action>,
     // dialogs: Vec<Dialog>,
     // messages: Vec<Message>,
     views: Vec<View>,
@@ -45,43 +45,13 @@ struct App {
 }
 
 impl App {
-    fn new(action_tx: UnboundedSender<Action>) -> Self {
+    fn new() -> Self {
         App {
             quit: false,
-            action_tx,
             // dialogs: Vec::new(),
             // messages: Vec::new(),
             views: Vec::new(),
             active_view: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum Action {
-    Quit,
-    Render,
-    None,
-    Tick,
-    DialogDown,
-    DialogUp,
-    Dialog(Dialog),
-    Message(Message),
-}
-
-impl Action {
-    fn from_term_event(_app: &App, event: TermEvent) -> Action {
-        match event {
-            TermEvent::Error => Action::None,
-            TermEvent::Tick => Action::Tick,
-            TermEvent::Render => Action::Render,
-            TermEvent::Key(key) => match key.code {
-                Char('J') => Action::DialogDown,
-                Char('K') => Action::DialogUp,
-                Char('q') => Action::Quit,
-                _ => Action::None,
-            },
-            _ => Action::None,
         }
     }
 }
@@ -132,33 +102,33 @@ fn ui(frame: &mut Frame, app: &mut App) {
     frame.render_widget(status_view, layout[1]);
 }
 
-fn update(app: &mut App, action: Action, client: Client) {
-    match action {
-        Action::Quit => app.quit = true,
-        Action::Dialog(dialog) => {
-            // app.dialogs.push(dialog);
-            app.views.push(View::new(dialog))
-        }
-        Action::Message(_message) => {}
-        Action::None => {}
-        Action::Tick => {}
-        Action::Render => {}
-        Action::DialogUp => {
-        }
-        Action::DialogDown => {
-            let action_tx = app.action_tx.clone();
-            app.active_view = Some(app.active_view.unwrap_or(0)+1);
-            let c = &app.views[app.active_view.unwrap()].dialog.chat().clone();
-            tokio::spawn(async move {
-                let mut messages = client.iter_messages(c).limit(40);
-
-                while let Some(message) = messages.next().await.unwrap() {
-                    action_tx.send(Action::Message(message));
-                }
-            });
-        }
-    };
-}
+// fn update(app: &mut App, action: Action, client: Client) {
+//     match action {
+//         Action::Quit => app.quit = true,
+//         Action::Dialog(dialog) => {
+//             // app.dialogs.push(dialog);
+//             app.views.push(View::new(dialog))
+//         }
+//         Action::Message(_message) => {}
+//         Action::None => {}
+//         Action::Tick => {}
+//         Action::Render => {}
+//         Action::DialogUp => {
+//         }
+//         Action::DialogDown => {
+//             let action_tx = app.action_tx.clone();
+//             app.active_view = Some(app.active_view.unwrap_or(0)+1);
+//             let c = &app.views[app.active_view.unwrap()].dialog.chat().clone();
+//             tokio::spawn(async move {
+//                 let mut messages = client.iter_messages(c).limit(40);
+//
+//                 while let Some(message) = messages.next().await.unwrap() {
+//                     action_tx.send(Action::Message(message));
+//                 }
+//             });
+//         }
+//     };
+// }
 
 fn init_dialogs(app: &App, client: Client) {
     let action_tx = app.action_tx.clone();
@@ -187,46 +157,82 @@ fn receive_updates(app: &App, client: Client) {
     });
 }
 
+#[derive(Debug)]
+enum ApiEvent {
+    Message(Message),
+    LoadMessages(Dialog),
+    Error(InvocationError),
+}
+
 async fn run() -> Result<()> {
-    let (action_tx, mut action_rx) = mpsc::unbounded_channel();
+    // let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
     let client = api::login().await?;
 
-    let mut term = tui::TermApi::new()?;
-    term.enter()?;
+    let (screen_tx, screen_rx) = mpsc::unbounded_channel();
+    let mut screen = screen::Screen::new(screen_tx.clone());
+    screen.enter()?;
 
-    let mut app = App::new(action_tx.clone());
+    let mut app = App::new();
 
     init_dialogs(&app, client.clone());
     receive_updates(&app, client.clone());
 
     loop {
-        if let Some(e) = term.next().await {
-            match e {
-                TermEvent::Quit => action_tx.send(Action::Quit)?,
-                TermEvent::Tick => action_tx.send(Action::Tick)?,
-                TermEvent::Render => action_tx.send(Action::Render)?,
-                TermEvent::Key(_) => action_tx.send(Action::from_term_event(&app, e))?,
-                _ => {}
+        tokio::select! {
+            Some(e) = screen.next() => { 
+                match e {
+                    ScreenEvent::Quit => {},
+                    ScreenEvent::Tick => {},
+                    ScreenEvent::Render => {},
+                    ScreenEvent::Key(e) => {
+                        match (e.modifiers, e.code) {
+                            _ => {}
+                        }
+                    },
+                    ScreenEvent::Quit => app.quit = true,
+                    _ => {}
+                }
             }
-        };
 
-        while let Ok(action) = action_rx.try_recv() {
-            update(&mut app, action.clone(), client.clone());
+            Some(api_event) = next_api_event() => {
+                match api_event {
+                    // ApiEvent::Dialog(dialog) => {
+                    //     // app.dialogs.push(dialog);
+                    //     app.views.push(View::new(dialog))
+                    // }
+                    ApiEvent::Message(_message) => {
+                    }
+                    ApiEvent::LoadMessages(_) => {
+                    }
+                    ApiEvent::Error(_) => {
+                    }
+                    Action::DialogDown => {
+                        let action_tx = app.action_tx.clone();
+                        app.active_view = Some(app.active_view.unwrap_or(0)+1);
+                        let c = &app.views[app.active_view.unwrap()].dialog.chat().clone();
+                        tokio::spawn(async move {
+                            let mut messages = client.iter_messages(c).limit(40);
 
-            if let Action::Render = action {
-                term.terminal.draw(|f| {
-                    ui(f, &mut app);
-                })?;
+                            while let Some(message) = messages.next().await.unwrap() {
+                                action_tx.send(Action::Message(message));
+                            }
+                        });
+                    }
+                }
             }
         }
+
+        screen.terminal.draw(|f| {
+            ui(f, &mut app);
+        })?;
 
         if app.quit {
             break;
         }
     }
 
-    term.exit()?;
+    screen.exit()?;
 
     Ok(())
 }

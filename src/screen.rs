@@ -17,7 +17,7 @@ use tokio::{
 };
 
 #[derive(Clone, Debug)]
-pub enum TermEvent {
+pub enum ScreenEvent {
     Init,
     Quit,
     Error,
@@ -32,36 +32,36 @@ pub enum TermEvent {
     Resize(u16, u16),
 }
 
-pub struct TermApi {
+pub struct Screen {
     pub terminal: ratatui::Terminal<Backend<std::io::Stderr>>,
     pub task: JoinHandle<()>,
-    pub event_rx: UnboundedReceiver<TermEvent>,
-    pub event_tx: UnboundedSender<TermEvent>,
+    // pub rx: UnboundedReceiver<ScreenEvent>,
+    pub tx: UnboundedSender<ScreenEvent>,
     pub mouse: bool,
     pub paste: bool,
 }
 
-impl TermApi {
-    pub fn new() -> Result<Self> {
+impl Screen {
+    pub fn new(tx: UnboundedSender<ScreenEvent>) -> Result<Self> {
         let terminal = ratatui::Terminal::new(Backend::new(std::io::stderr()))?;
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        // let (event_tx, event_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async {});
         let mouse = true;
         let paste = true;
         Ok(Self {
             terminal,
             task,
-            event_rx,
-            event_tx,
+            // rx,
+            tx,
             mouse,
             paste,
         })
     }
 
     pub fn start(&mut self) {
-        let tick_delay = std::time::Duration::from_secs_f64(1.0 / 4.0);
-        let render_delay = std::time::Duration::from_secs_f64(1.0 / 60.0);
-        let event_tx = self.event_tx.clone();
+        let tick_delay = std::time::Duration::from_secs_f64(1.0);
+        let render_delay = std::time::Duration::from_secs_f64(1.0 / 20.0);
+        let event_tx = self.tx.clone();
         self.task = tokio::spawn(async move {
             let mut reader = EventStream::new();
             let mut tick_interval = tokio::time::interval(tick_delay);
@@ -78,37 +78,37 @@ impl TermApi {
                         match evt {
                           Event::Key(key) => {
                             if key.kind == KeyEventKind::Press {
-                              event_tx.send(TermEvent::Key(key)).unwrap();
+                              event_tx.send(ScreenEvent::Key(key)).unwrap();
                             }
                           },
                           Event::Mouse(mouse) => {
-                            event_tx.send(TermEvent::Mouse(mouse)).unwrap();
+                            event_tx.send(ScreenEvent::Mouse(mouse)).unwrap();
                           },
                           Event::Resize(x, y) => {
-                            event_tx.send(TermEvent::Resize(x, y)).unwrap();
+                            event_tx.send(ScreenEvent::Resize(x, y)).unwrap();
                           },
                           Event::FocusLost => {
-                            event_tx.send(TermEvent::FocusLost).unwrap();
+                            event_tx.send(ScreenEvent::FocusLost).unwrap();
                           },
                           Event::FocusGained => {
-                            event_tx.send(TermEvent::FocusGained).unwrap();
+                            event_tx.send(ScreenEvent::FocusGained).unwrap();
                           },
                           Event::Paste(s) => {
-                            event_tx.send(TermEvent::Paste(s)).unwrap();
+                            event_tx.send(ScreenEvent::Paste(s)).unwrap();
                           },
                         }
                       }
                       Some(Err(_)) => {
-                        event_tx.send(TermEvent::Error).unwrap();
+                        event_tx.send(ScreenEvent::Error).unwrap();
                       }
                       None => {},
                     }
                   },
                   _ = tick_delay => {
-                      event_tx.send(TermEvent::Tick).unwrap();
+                      event_tx.send(ScreenEvent::Tick).unwrap();
                   },
                   _ = render_delay => {
-                      event_tx.send(TermEvent::Render).unwrap();
+                      event_tx.send(ScreenEvent::Render).unwrap();
                   },
                 }
             }
@@ -154,9 +154,9 @@ impl TermApi {
         self.enter()?;
         Ok(())
     }
-
-    pub async fn next(&mut self) -> Option<TermEvent> {
-        self.event_rx.recv().await
-    }
+    //
+    // pub async fn next(&mut self) -> Option<ScreenEvent> {
+    //     self.rx.recv().await
+    // }
 }
 
