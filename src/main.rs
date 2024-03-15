@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use grammers_client::types::iter_buffer::InvocationError;
 use grammers_client::types::{Chat, Dialog, Message, MessageDeletion};
 use grammers_client::{Client, Update};
+use grammers_session::PackedChat;
 use ratatui::{prelude::*, widgets::*};
 
 use screen::ScreenEvent;
@@ -114,7 +115,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
 #[derive(Debug)]
 enum ApiJob {
     /// Load a part of chat messages
-    LoadMessages,
+    LoadMessages(PackedChat),
 
     /// Initial loading of all dialogs
     LoadDialogs,
@@ -128,28 +129,33 @@ async fn api_worker(
 ) {
     loop {
         tokio::select! {
-            job = rx.recv() => {
-                let Some(job) = job else { break; };
-                let tx = tx.clone();
-                let client = client.clone();
-                tokio::spawn(async move {
-                    match job {
-                        ApiJob::LoadDialogs => {
-                            let mut dialogs = client.iter_dialogs();
-                            while let Some(dialog) = dialogs.next().await.unwrap() {
-                                tx.send(ApiEvent::LoadedDialog(dialog)).unwrap();
-                            }
-                        }
-                        ApiJob::LoadMessages => {
-                            // let mut messages = client.iter_messages(..).limit(40);
-                            //
-                            // while let Some(message) = messages.next().await.unwrap() {
-                            //      tx.send(..)
-                            // }
+        job = rx.recv() => {
+            let Some(job) = job else { break; };
+            let tx = tx.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                match job {
+                    ApiJob::LoadDialogs => {
+                        let mut dialogs = client.iter_dialogs();
+                        while let Some(dialog) = dialogs.next().await.unwrap() {
+                            tx.send(ApiEvent::LoadedDialog(dialog)).unwrap();
                         }
                     }
-                });
-            }
+                    ApiJob::LoadMessages(c) => {
+                        // TODO: when scrolling up, load necessary messages. For now this is
+                        // just for initial loading of chats (and the view is not scrollable)
+
+                        let mut message_iter = client.iter_messages(c).limit(30);
+
+                        // let mut messages = Vec::new();
+                        while let Some(message) = message_iter.next().await.unwrap() {
+                            // messages.push(message);
+                            tx.send(ApiEvent::LoadedMessages(message)).unwrap();
+                        }
+                    }
+                }
+            });
+        }
             update = client.next_update() => {
                 let Ok(update) = update else {
                     tx.send(ApiEvent::Error()).unwrap();
@@ -226,16 +232,10 @@ async fn run() -> Result<()> {
                                 app.quit = true;
                             }
                             (KeyModifiers::NONE, KeyCode::Char('j')) => {
-                                // let action_tx = app.action_tx.clone();
-                                // app.active_view = Some(app.active_view.unwrap_or(0)+1);
-                                // let c = &app.views[app.active_view.unwrap()].dialog.chat().clone();
-                                // tokio::spawn(async move {
-                                //     let mut messages = client.iter_messages(c).limit(40);
-                                //
-                                //     while let Some(message) = messages.next().await.unwrap() {
-                                //         action_tx.send(Action::Message(message));
-                                //     }
-                                // });
+                                app.active_view = Some(0);
+                                api_job_tx.send(ApiJob::LoadMessages(app.views[0].dialog.chat().pack())).unwrap();
+                            }
+                            (KeyModifiers::NONE, KeyCode::Char('k')) => {
                             }
                             _ => {}
                         }
@@ -249,11 +249,15 @@ async fn run() -> Result<()> {
                 match api_event {
                     ApiEvent::LoadedDialog(dialog) => {
                         let view = View::new(dialog);
-                        // api_job_tx.send(ApiJob::LoadMessages)
                         app.views.push(view);
                     }
-                    ApiEvent::LoadedMessages(_message) => {
-
+                    ApiEvent::LoadedMessages(message) => {
+                        for v in app.views.iter_mut() {
+                            if v.dialog.chat().pack() == message.chat().pack() {
+                                v.messages_cache.push(message);
+                                break;
+                            }
+                        }
                     }
                     ApiEvent::MessageNew(_message) => {
                     }
