@@ -1,6 +1,7 @@
 mod api;
 mod screen;
 
+use screen::ScreenEvent;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 use grammers_client::types::iter_buffer::InvocationError;
@@ -8,18 +9,10 @@ use grammers_client::types::{Chat, Dialog, Message, MessageDeletion};
 use grammers_client::{Client, Update};
 use grammers_session::PackedChat;
 use ratatui::{prelude::*, widgets::*};
-
-use screen::ScreenEvent;
 use tokio::sync::mpsc;
+use std::cmp;
 
-pub fn setup_panic_handler() {
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen).unwrap();
-        crossterm::terminal::disable_raw_mode().unwrap();
-        original_hook(panic_info);
-    }));
-}
+
 
 /// Chat state
 struct View {
@@ -232,8 +225,10 @@ async fn run() -> Result<()> {
                                 app.quit = true;
                             }
                             (KeyModifiers::NONE, KeyCode::Char('j')) => {
-                                app.active_view = Some(0);
-                                api_job_tx.send(ApiJob::LoadMessages(app.views[0].dialog.chat().pack())).unwrap();
+                                let idx = cmp::min(app.active_view.unwrap_or(0) + 1, app.views.len()-1);
+                                app.active_view = Some(idx);
+                                let chat = app.views[idx].dialog.chat().pack();
+                                api_job_tx.send(ApiJob::LoadMessages(chat)).unwrap();
                             }
                             (KeyModifiers::NONE, KeyCode::Char('k')) => {
                             }
@@ -287,7 +282,7 @@ async fn run() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    setup_panic_handler();
+    screen::setup_panic_handler();
 
     let result = run().await;
 
