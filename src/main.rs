@@ -20,7 +20,6 @@ pub fn setup_panic_handler() {
     }));
 }
 
-
 /// Chat state
 struct View {
     dialog: Dialog,
@@ -90,14 +89,15 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let active_chat_widget = if let Some(idx) = app.active_view {
         List::new(
             app.views
-                .get(idx).unwrap()
+                .get(idx)
+                .unwrap()
                 .messages_cache
                 .iter()
                 .map(|m| m.text())
-                .map(Line::from)
+                .map(Line::from),
         )
     } else {
-            List::default()
+        List::default()
     }
     .direction(ListDirection::BottomToTop)
     .block(Block::default().borders(Borders::ALL));
@@ -120,45 +120,51 @@ enum ApiJob {
     LoadDialogs,
 }
 
-/// Perform API calls requested by application actions
+/// Perform API calls and receive updates.
 async fn api_worker(
     client: Client,
     mut rx: UnboundedReceiver<ApiJob>,
     tx: UnboundedSender<ApiEvent>,
 ) {
     loop {
-        let Some(job) = rx.recv().await else { break; };
-        let tx = tx.clone();
-        let client = client.clone();
-        tokio::spawn(async move {
-            match job {
-                ApiJob::LoadDialogs => {
-                    let mut dialogs = client.iter_dialogs();
-                    while let Some(dialog) = dialogs.next().await.unwrap() {
-                        tx.send(ApiEvent::LoadedDialog(dialog)).unwrap();
+        tokio::select! {
+            job = rx.recv() => {
+                let Some(job) = job else { break; };
+                let tx = tx.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    match job {
+                        ApiJob::LoadDialogs => {
+                            let mut dialogs = client.iter_dialogs();
+                            while let Some(dialog) = dialogs.next().await.unwrap() {
+                                tx.send(ApiEvent::LoadedDialog(dialog)).unwrap();
+                            }
+                        }
+                        ApiJob::LoadMessages => {
+                            // let mut messages = client.iter_messages(..).limit(40);
+                            //
+                            // while let Some(message) = messages.next().await.unwrap() {
+                            //      tx.send(..)
+                            // }
+                        }
                     }
-                }
-                ApiJob::LoadMessages => {
-                    // let mut messages = client.iter_messages(..).limit(40);
-                    //
-                    // while let Some(message) = messages.next().await.unwrap() {
-                    //      tx.send(..)
-                    // }
+                });
+            }
+            update = client.next_update() => {
+                let Ok(update) = update else {
+                    tx.send(ApiEvent::Error()).unwrap();
+                    break;
+                };
+                let Some(update) = update else { break; };
+                match update {
+                    Update::NewMessage(message) if !message.outgoing() => {
+                        tx.send(ApiEvent::MessageNew(message)).unwrap();
+                    }
+                    Update::MessageDeleted(_message_del) => {}
+                    Update::MessageEdited(_message) => {}
+                    _ => {}
                 }
             }
-        });
-    }
-}
-
-async fn receive_api_updates(client: Client, tx: UnboundedSender<ApiEvent>) {
-    while let Some(update) = client.next_update().await.unwrap() {
-        match update {
-            Update::NewMessage(message) if !message.outgoing() => {
-                tx.send(ApiEvent::MessageNew(message)).unwrap();
-            }
-            Update::MessageDeleted(_message_del) => {}
-            Update::MessageEdited(_message) => {}
-            _ => {}
         }
     }
 }
@@ -204,14 +210,6 @@ async fn run() -> Result<()> {
     screen.enter()?;
 
     let mut app = App::new();
-
-    tokio::spawn({
-        let api_tx = api_tx.clone();
-        let client = client.clone();
-        async move {
-            receive_api_updates(client, api_tx).await;
-        }
-    });
 
     api_job_tx.send(ApiJob::LoadDialogs).unwrap();
 
