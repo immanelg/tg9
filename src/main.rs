@@ -9,7 +9,7 @@ use grammers_client::{Client, Update};
 use ratatui::{prelude::*, widgets::*};
 
 use screen::ScreenEvent;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc;
 
 pub fn setup_panic_handler() {
     let original_hook = std::panic::take_hook();
@@ -123,8 +123,8 @@ enum ApiJob {
 /// Perform API calls and receive updates.
 async fn api_worker(
     client: Client,
-    mut rx: UnboundedReceiver<ApiJob>,
-    tx: UnboundedSender<ApiEvent>,
+    mut rx: mpsc::UnboundedReceiver<ApiJob>,
+    tx: mpsc::UnboundedSender<ApiEvent>,
 ) {
     loop {
         tokio::select! {
@@ -206,7 +206,7 @@ async fn run() -> Result<()> {
     });
 
     let (screen_tx, mut screen_rx) = mpsc::unbounded_channel();
-    let mut screen = screen::Screen::new(screen_tx.clone()).unwrap();
+    let mut screen = screen::Screen::new(screen_tx).unwrap();
     screen.enter()?;
 
     let mut app = App::new();
