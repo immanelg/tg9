@@ -2,17 +2,19 @@ use anyhow::Result;
 
 use futures::{future::FutureExt, StreamExt};
 
+use std::io::{stdout, Stdout};
+use crossterm;
 use crossterm::{
-    cursor,
+    cursor::{Hide, Show},
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, EventStream, KeyEvent, KeyEventKind, MouseEvent,
     },
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, is_raw_mode_enabled, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::backend::CrosstermBackend as Backend;
 use tokio::{
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::mpsc,
     task::JoinHandle,
 };
 
@@ -33,16 +35,16 @@ pub enum ScreenEvent {
 }
 
 pub struct Screen {
-    pub terminal: ratatui::Terminal<Backend<std::io::Stderr>>,
+    pub terminal: ratatui::Terminal<Backend<Stdout>>,
     pub task: JoinHandle<()>,
-    pub tx: UnboundedSender<ScreenEvent>,
+    pub tx: mpsc::UnboundedSender<ScreenEvent>,
     pub mouse: bool,
     pub paste: bool,
 }
 
 impl Screen {
-    pub fn new(tx: UnboundedSender<ScreenEvent>) -> Result<Self> {
-        let terminal = ratatui::Terminal::new(Backend::new(std::io::stderr()))?;
+    pub fn new(tx: mpsc::UnboundedSender<ScreenEvent>) -> Result<Self> {
+        let terminal = ratatui::Terminal::new(Backend::new(stdout()))?;
         let task = tokio::spawn(async {});
         let mouse = true;
         let paste = true;
@@ -114,29 +116,17 @@ impl Screen {
     }
 
     pub fn enter(&mut self) -> Result<()> {
-        crossterm::terminal::enable_raw_mode()?;
-        crossterm::execute!(std::io::stderr(), EnterAlternateScreen, cursor::Hide)?;
-        if self.mouse {
-            crossterm::execute!(std::io::stderr(), EnableMouseCapture)?;
-        }
-        if self.paste {
-            crossterm::execute!(std::io::stderr(), EnableBracketedPaste)?;
-        }
+        enable_raw_mode()?;
+        crossterm::execute!(stdout(), EnterAlternateScreen, Hide, EnableMouseCapture, EnableBracketedPaste)?;
         self.start();
         Ok(())
     }
 
     pub fn exit(&mut self) -> Result<()> {
-        if crossterm::terminal::is_raw_mode_enabled()? {
+        if is_raw_mode_enabled()? {
             self.terminal.flush()?;
-            if self.paste {
-                crossterm::execute!(std::io::stderr(), DisableBracketedPaste)?;
-            }
-            if self.mouse {
-                crossterm::execute!(std::io::stderr(), DisableMouseCapture)?;
-            }
-            crossterm::execute!(std::io::stderr(), LeaveAlternateScreen, cursor::Show)?;
-            crossterm::terminal::disable_raw_mode()?;
+            crossterm::execute!(stdout(), LeaveAlternateScreen, Show, DisableMouseCapture, DisableBracketedPaste)?;
+            disable_raw_mode()?;
         }
         Ok(())
     }
@@ -156,4 +146,13 @@ impl Screen {
     // pub async fn next(&mut self) -> Option<ScreenEvent> {
     //     self.rx.recv().await
     // }
+}
+
+pub fn setup_panic_handler() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, DisableBracketedPaste, DisableMouseCapture).unwrap();
+        disable_raw_mode().unwrap();
+        original_hook(panic_info);
+    }));
 }
