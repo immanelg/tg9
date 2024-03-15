@@ -2,13 +2,13 @@ mod screen;
 mod api;
 
 use anyhow::Result;
-use crossterm::event::KeyCode::Char;
+use crossterm::event::{KeyCode, KeyModifiers};
 use grammers_client::types::iter_buffer::InvocationError;
-use grammers_client::types::{Dialog, Message, Chat};
+use grammers_client::types::{Dialog, Message, Chat, MessageDeletion};
 use grammers_client::{Client, Update};
 use ratatui::{prelude::*, widgets::*};
 
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedSender, UnboundedReceiver};
 use screen::ScreenEvent;
 
 pub fn setup_panic_handler() {
@@ -22,6 +22,7 @@ pub fn setup_panic_handler() {
 
 type Id = i64;
 
+/// Chat state
 struct View {
     dialog: Dialog,
     messages: Vec<Message>,
@@ -102,91 +103,114 @@ fn ui(frame: &mut Frame, app: &mut App) {
     frame.render_widget(status_view, layout[1]);
 }
 
-// fn update(app: &mut App, action: Action, client: Client) {
-//     match action {
-//         Action::Quit => app.quit = true,
-//         Action::Dialog(dialog) => {
-//             // app.dialogs.push(dialog);
-//             app.views.push(View::new(dialog))
-//         }
-//         Action::Message(_message) => {}
-//         Action::None => {}
-//         Action::Tick => {}
-//         Action::Render => {}
-//         Action::DialogUp => {
-//         }
-//         Action::DialogDown => {
-//             let action_tx = app.action_tx.clone();
-//             app.active_view = Some(app.active_view.unwrap_or(0)+1);
-//             let c = &app.views[app.active_view.unwrap()].dialog.chat().clone();
-//             tokio::spawn(async move {
-//                 let mut messages = client.iter_messages(c).limit(40);
-//
-//                 while let Some(message) = messages.next().await.unwrap() {
-//                     action_tx.send(Action::Message(message));
-//                 }
-//             });
-//         }
-//     };
-// }
+/// Jobs for api client worker to perform
+#[derive(Debug)]
+enum ApiJob {
+    /// Load a part of chat messages
+    LoadMessages,
 
-fn init_dialogs(app: &App, client: Client) {
-    let action_tx = app.action_tx.clone();
-    tokio::spawn(async move {
-        let mut dialogs = client.iter_dialogs();
-        while let Some(dialog) = dialogs.next().await.unwrap() {
-            action_tx.send(Action::Dialog(dialog)).unwrap();
-        }
-    });
+    /// Initial loading of all dialogs
+    LoadDialogs,
 }
 
-fn receive_updates(app: &App, client: Client) {
-    let action_tx = app.action_tx.clone();
-    tokio::spawn(async move {
-        while let Some(update) = client.next_update().await.unwrap() {
-            match update {
-                Update::NewMessage(message) if !message.outgoing() => {
-                    action_tx.send(Action::Message(message)).unwrap();
-                    // message.respond(message.text()).await?;
+/// Perform API calls requested by application actions
+async fn api_worker(client: Client, mut rx: UnboundedReceiver<ApiJob>, tx: UnboundedSender<ApiEvent>) {
+    loop {
+        let job = rx.recv().await.unwrap();
+        tokio::spawn(async move {
+            match job {
+                ApiJob::LoadDialogs => {
+                    let mut dialogs = client.iter_dialogs();
+                    while let Some(dialog) = dialogs.next().await.unwrap() {
+                        tx.send(ApiEvent::LoadMessages(()))
+                    }
                 }
-                Update::MessageDeleted(_del) => {}
-                Update::MessageEdited(_message) => {}
-                _ => {}
+                ApiJob::LoadMessages => {
+                    // let mut messages = client.iter_messages(..).limit(40);
+                    //
+                    // while let Some(message) = messages.next().await.unwrap() {
+                    //      tx.send(..)
+                    // }
+                }
             }
-        }
-    });
+        });
+    }
 }
 
+async fn receive_api_updates(client: Client, tx: UnboundedSender<ApiEvent>) {
+    while let Some(update) = client.next_update().await.unwrap() {
+        match update {
+            Update::NewMessage(message) if !message.outgoing() => {
+                tx.send(ApiEvent::Message(message)).unwrap();
+            }
+            Update::MessageDeleted(_message_del) => {
+            }
+            Update::MessageEdited(_message) => {}
+            _ => {}
+        }
+    }
+}
+
+/// Events that update state from API messages
 #[derive(Debug)]
 enum ApiEvent {
     Message(Message),
-    LoadMessages(Dialog),
-    Error(InvocationError),
+    DeleteMessage(MessageDeletion),
+    EditMessage(Message),
+    LoadMessages(_),
+    LoadDialogs(_),
+    Error(_),
 }
 
 async fn run() -> Result<()> {
-    // let (action_tx, mut action_rx) = mpsc::unbounded_channel();
-
+    // TODO: provide login data from tui
     let client = api::login().await?;
 
-    let (screen_tx, screen_rx) = mpsc::unbounded_channel();
-    let mut screen = screen::Screen::new(screen_tx.clone());
+    let (mut api_tx, mut api_rx) = mpsc::unbounded_channel();
+
+    let (mut api_job_tx, mut api_job_rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(async move {
+        api_worker(client.clone(), api_job_rx, api_tx.clone()).await;
+    });
+
+    let (mut screen_tx, mut screen_rx) = mpsc::unbounded_channel();
+    let mut screen = screen::Screen::new(screen_tx.clone()).unwrap();
     screen.enter()?;
 
     let mut app = App::new();
 
-    init_dialogs(&app, client.clone());
-    receive_updates(&app, client.clone());
+    tokio::spawn(async move {
+        receive_api_updates(client.clone(), api_tx.clone()).await;
+    });
+
+    api_job_tx.send(ApiJob::LoadDialogs);
 
     loop {
         tokio::select! {
-            Some(e) = screen.next() => { 
+            Some(e) = screen_rx.recv() => { 
                 match e {
                     ScreenEvent::Quit => {},
                     ScreenEvent::Tick => {},
                     ScreenEvent::Render => {},
+
                     ScreenEvent::Key(e) => {
                         match (e.modifiers, e.code) {
+                            (KeyModifiers::NONE, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                                app.quit = true;
+                            }
+                            (KeyModifiers::NONE, KeyCode::Char('j')) => {
+                                // let action_tx = app.action_tx.clone();
+                                // app.active_view = Some(app.active_view.unwrap_or(0)+1);
+                                // let c = &app.views[app.active_view.unwrap()].dialog.chat().clone();
+                                // tokio::spawn(async move {
+                                //     let mut messages = client.iter_messages(c).limit(40);
+                                //
+                                //     while let Some(message) = messages.next().await.unwrap() {
+                                //         action_tx.send(Action::Message(message));
+                                //     }
+                                // });
+                            }
                             _ => {}
                         }
                     },
@@ -195,29 +219,13 @@ async fn run() -> Result<()> {
                 }
             }
 
-            Some(api_event) = next_api_event() => {
+            Some(api_event) = api_rx.recv() => {
                 match api_event {
-                    // ApiEvent::Dialog(dialog) => {
-                    //     // app.dialogs.push(dialog);
-                    //     app.views.push(View::new(dialog))
-                    // }
                     ApiEvent::Message(_message) => {
                     }
                     ApiEvent::LoadMessages(_) => {
                     }
                     ApiEvent::Error(_) => {
-                    }
-                    Action::DialogDown => {
-                        let action_tx = app.action_tx.clone();
-                        app.active_view = Some(app.active_view.unwrap_or(0)+1);
-                        let c = &app.views[app.active_view.unwrap()].dialog.chat().clone();
-                        tokio::spawn(async move {
-                            let mut messages = client.iter_messages(c).limit(40);
-
-                            while let Some(message) = messages.next().await.unwrap() {
-                                action_tx.send(Action::Message(message));
-                            }
-                        });
                     }
                 }
             }

@@ -35,7 +35,6 @@ pub enum ScreenEvent {
 pub struct Screen {
     pub terminal: ratatui::Terminal<Backend<std::io::Stderr>>,
     pub task: JoinHandle<()>,
-    // pub rx: UnboundedReceiver<ScreenEvent>,
     pub tx: UnboundedSender<ScreenEvent>,
     pub mouse: bool,
     pub paste: bool,
@@ -44,14 +43,12 @@ pub struct Screen {
 impl Screen {
     pub fn new(tx: UnboundedSender<ScreenEvent>) -> Result<Self> {
         let terminal = ratatui::Terminal::new(Backend::new(std::io::stderr()))?;
-        // let (event_tx, event_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async {});
         let mouse = true;
         let paste = true;
         Ok(Self {
             terminal,
             task,
-            // rx,
             tx,
             mouse,
             paste,
@@ -72,44 +69,45 @@ impl Screen {
                 let render_delay = render_interval.tick();
                 let crossterm_event = reader.next().fuse();
                 tokio::select! {
-                  maybe_event = crossterm_event => {
-                    match maybe_event {
-                      Some(Ok(evt)) => {
-                        match evt {
-                          Event::Key(key) => {
-                            if key.kind == KeyEventKind::Press {
-                              event_tx.send(ScreenEvent::Key(key)).unwrap();
+                    // TODO: signals
+                    maybe_event = crossterm_event => {
+                        match maybe_event {
+                            Some(Ok(evt)) => {
+                                match evt {
+                                    Event::Key(key) => {
+                                        if key.kind == KeyEventKind::Press {
+                                            event_tx.send(ScreenEvent::Key(key)).unwrap();
+                                        }
+                                    },
+                                    Event::Mouse(mouse) => {
+                                        event_tx.send(ScreenEvent::Mouse(mouse)).unwrap();
+                                    },
+                                    Event::Resize(x, y) => {
+                                        event_tx.send(ScreenEvent::Resize(x, y)).unwrap();
+                                    },
+                                    Event::FocusLost => {
+                                        event_tx.send(ScreenEvent::FocusLost).unwrap();
+                                    },
+                                    Event::FocusGained => {
+                                        event_tx.send(ScreenEvent::FocusGained).unwrap();
+                                    },
+                                    Event::Paste(s) => {
+                                        event_tx.send(ScreenEvent::Paste(s)).unwrap();
+                                    },
+                                }
                             }
-                          },
-                          Event::Mouse(mouse) => {
-                            event_tx.send(ScreenEvent::Mouse(mouse)).unwrap();
-                          },
-                          Event::Resize(x, y) => {
-                            event_tx.send(ScreenEvent::Resize(x, y)).unwrap();
-                          },
-                          Event::FocusLost => {
-                            event_tx.send(ScreenEvent::FocusLost).unwrap();
-                          },
-                          Event::FocusGained => {
-                            event_tx.send(ScreenEvent::FocusGained).unwrap();
-                          },
-                          Event::Paste(s) => {
-                            event_tx.send(ScreenEvent::Paste(s)).unwrap();
-                          },
+                            Some(Err(_)) => {
+                                event_tx.send(ScreenEvent::Error).unwrap();
+                            }
+                            None => {},
                         }
-                      }
-                      Some(Err(_)) => {
-                        event_tx.send(ScreenEvent::Error).unwrap();
-                      }
-                      None => {},
-                    }
-                  },
-                  _ = tick_delay => {
-                      event_tx.send(ScreenEvent::Tick).unwrap();
-                  },
-                  _ = render_delay => {
-                      event_tx.send(ScreenEvent::Render).unwrap();
-                  },
+                    },
+                        _ = tick_delay => {
+                            event_tx.send(ScreenEvent::Tick).unwrap();
+                        },
+                        _ = render_delay => {
+                        event_tx.send(ScreenEvent::Render).unwrap();
+                    },
                 }
             }
         });
