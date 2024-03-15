@@ -2,7 +2,6 @@ use anyhow::Result;
 use grammers_client::{Client, Config, SignInError};
 use grammers_session::Session;
 
-
 use std::io::{self, BufRead};
 
 static API_ID: &str = env!("TG9_API_ID");

@@ -3,13 +3,12 @@ mod tui;
 
 use anyhow::Result;
 use crossterm::event::KeyCode::Char;
-use futures::SinkExt;
 use grammers_client::types::{Dialog, Message};
 use grammers_client::{Client, Update};
 use ratatui::{prelude::*, widgets::*};
 
 use tokio::sync::mpsc::{self, UnboundedSender};
-use tui::Event;
+use tui::TermEvent;
 
 pub fn setup_panic_handler() {
     let original_hook = std::panic::take_hook();
@@ -22,30 +21,38 @@ pub fn setup_panic_handler() {
 
 type Id = i64;
 
-// struct Dialog {
-//     id: Id,
-//     name: String,
-//     // last message, messages, etc
-// }
-//
-struct App {
-    should_quit: bool,
-    action_tx: UnboundedSender<Action>,
-    counter: i64,
-    dialogs: Vec<Dialog>,
+struct View {
+    dialog: Dialog,
     messages: Vec<Message>,
-    active_chat_id: Option<Id>,
+}
+
+impl View {
+    fn new(dialog: Dialog) -> View {
+        View {
+            dialog,
+            messages: Vec::new(),
+        }
+    }
+}
+
+struct App {
+    quit: bool,
+    action_tx: UnboundedSender<Action>,
+    // dialogs: Vec<Dialog>,
+    // messages: Vec<Message>,
+    views: Vec<View>,
+    active_view: Option<usize>,
 }
 
 impl App {
     fn new(action_tx: UnboundedSender<Action>) -> Self {
         App {
-            should_quit: false,
+            quit: false,
             action_tx,
-            counter: 0,
-            dialogs: Vec::new(),
-            messages: Vec::new(),
-            active_chat_id: None,
+            // dialogs: Vec::new(),
+            // messages: Vec::new(),
+            views: Vec::new(),
+            active_view: None,
         }
     }
 }
@@ -56,21 +63,21 @@ pub enum Action {
     Render,
     None,
     Tick,
-    Down,
-    Up,
+    DialogDown,
+    DialogUp,
     Dialog(Dialog),
     Message(Message),
 }
 
 impl Action {
-    fn from_event(_app: &App, event: Event) -> Action {
+    fn from_term_event(_app: &App, event: TermEvent) -> Action {
         match event {
-            Event::Error => Action::None,
-            Event::Tick => Action::Tick,
-            Event::Render => Action::Render,
-            Event::Key(key) => match key.code {
-                Char('j') => Action::Down,
-                Char('k') => Action::Up,
+            TermEvent::Error => Action::None,
+            TermEvent::Tick => Action::Tick,
+            TermEvent::Render => Action::Render,
+            TermEvent::Key(key) => match key.code {
+                Char('J') => Action::DialogDown,
+                Char('K') => Action::DialogUp,
                 Char('q') => Action::Quit,
                 _ => Action::None,
             },
@@ -83,46 +90,77 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let area = frame.size();
 
     let layout = Layout::default()
-        .constraints(vec![
-            Constraint::Percentage(25), Constraint::Percentage(75)
-        ])
-        .direction(Direction::Horizontal)
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Min(0), Constraint::Max(3)])
         .split(area);
 
+    let view_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![Constraint::Percentage(33), Constraint::Percentage(67)])
+        .split(layout[0]);
+
     let dialogs_widget = List::new(
-        app.dialogs
-        .iter()
-        .map(|dial| format!("[{}]: {}", dial.chat().name(), dial.last_message.as_ref().map(|m| m.text()).unwrap_or("")))
-        .map(ListItem::new)
-        )
-        .bg(Color::Blue)
+        app.views
+            .iter()
+            .map(|c| {
+                format!(
+                    "[{}]: {}",
+                    c.dialog.chat().name(),
+                    c.dialog.last_message.as_ref().map(|m| m.text()).unwrap_or("")
+                )
+            })
+            .map(Line::from),
+    )
+    .block(Block::default().borders(Borders::ALL));
+
+    let active_chat_widget = List::new(
+        app.views[0].messages
+            .iter()
+            .map(|m| {
+                m.text()
+            })
+            .map(Line::from),
+    )
+        .direction(ListDirection::BottomToTop)
         .block(Block::default().borders(Borders::ALL));
 
-    let active_chat_widget = List::new(["AHAHAHAHAHAH", "LLALLKASSJAKSJAAJJSAJS", "kjhkjasdhfkjashfkjdhsfkjdshafkjhdskjfhkjadshfkjasdhkjdhaskjfhdkjashfkjsdahfkljhfdkjshfkjdashfkjdhskjafhks"])
-        .bg(Color::Green)
-        .block(Block::default().borders(Borders::ALL));
+    let status_view =
+        Paragraph::new(Line::from("tg9 v0.1")).block(Block::new().borders(Borders::ALL));
 
-    frame.render_widget(dialogs_widget, layout[0]);
-    frame.render_widget(active_chat_widget, layout[1]);
+    frame.render_widget(dialogs_widget, view_layout[0]);
+    frame.render_widget(active_chat_widget, view_layout[1]);
+    frame.render_widget(status_view, layout[1]);
 }
 
-fn update(app: &mut App, action: Action) {
+fn update(app: &mut App, action: Action, client: Client) {
     match action {
-        Action::Quit => app.should_quit = true,
+        Action::Quit => app.quit = true,
         Action::Dialog(dialog) => {
-            // this should probably be a hashmap, etc
-            app.dialogs.push(dialog);
+            // app.dialogs.push(dialog);
+            app.views.push(View::new(dialog))
         }
         Action::Message(_message) => {}
         Action::None => {}
         Action::Tick => {}
         Action::Render => {}
-        Action::Up => {}
-        Action::Down => {}
+        Action::DialogUp => {
+        }
+        Action::DialogDown => {
+            let action_tx = app.action_tx.clone();
+            app.active_view = Some(app.active_view.unwrap_or(0)+1);
+            let c = &app.views[app.active_view.unwrap()].dialog.chat().clone();
+            tokio::spawn(async move {
+                let mut messages = client.iter_messages(c).limit(40);
+
+                while let Some(message) = messages.next().await.unwrap() {
+                    action_tx.send(Action::Message(message));
+                }
+            });
+        }
     };
 }
 
-fn init_state(app: &App, client: Client) {
+fn init_dialogs(app: &App, client: Client) {
     let action_tx = app.action_tx.clone();
     tokio::spawn(async move {
         let mut dialogs = client.iter_dialogs();
@@ -132,15 +170,13 @@ fn init_state(app: &App, client: Client) {
     });
 }
 
-fn listen_updates(app: &App, client: Client) {
+fn receive_updates(app: &App, client: Client) {
     let action_tx = app.action_tx.clone();
     tokio::spawn(async move {
         while let Some(update) = client.next_update().await.unwrap() {
             match update {
                 Update::NewMessage(message) if !message.outgoing() => {
-                    // TODO: maybe use these types directly for simplicity
                     action_tx.send(Action::Message(message)).unwrap();
-                    // action_tx.send(message)
                     // message.respond(message.text()).await?;
                 }
                 Update::MessageDeleted(_del) => {}
@@ -156,45 +192,41 @@ async fn run() -> Result<()> {
 
     let client = api::login().await?;
 
-    let mut tui = tui::Tui::new()?
-        .tick_rate(1.0)
-        .frame_rate(30.0)
-        .mouse(true)
-        .paste(true);
-    tui.enter()?;
+    let mut term = tui::TermApi::new()?;
+    term.enter()?;
 
     let mut app = App::new(action_tx.clone());
 
-    init_state(&app, client.clone());
-    listen_updates(&app, client.clone());
+    init_dialogs(&app, client.clone());
+    receive_updates(&app, client.clone());
 
     loop {
-        if let Some(e) = tui.next().await {
+        if let Some(e) = term.next().await {
             match e {
-                tui::Event::Quit => action_tx.send(Action::Quit)?,
-                tui::Event::Tick => action_tx.send(Action::Tick)?,
-                tui::Event::Render => action_tx.send(Action::Render)?,
-                tui::Event::Key(_) => action_tx.send(Action::from_event(&app, e))?,
+                TermEvent::Quit => action_tx.send(Action::Quit)?,
+                TermEvent::Tick => action_tx.send(Action::Tick)?,
+                TermEvent::Render => action_tx.send(Action::Render)?,
+                TermEvent::Key(_) => action_tx.send(Action::from_term_event(&app, e))?,
                 _ => {}
             }
         };
 
         while let Ok(action) = action_rx.try_recv() {
-            update(&mut app, action.clone());
+            update(&mut app, action.clone(), client.clone());
 
             if let Action::Render = action {
-                tui.draw(|f| {
+                term.terminal.draw(|f| {
                     ui(f, &mut app);
                 })?;
             }
         }
 
-        if app.should_quit {
+        if app.quit {
             break;
         }
     }
 
-    tui.exit()?;
+    term.exit()?;
 
     Ok(())
 }
