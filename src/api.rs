@@ -54,7 +54,3 @@ pub async fn login() -> Result<Client> {
     }
     Ok(client)
 }
-
-// pub async fn start_client(rx: UnboundedReceiver, tx: UnboundedSender<>) {
-//
-// }

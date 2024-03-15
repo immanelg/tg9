@@ -1,15 +1,15 @@
-mod screen;
 mod api;
+mod screen;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 use grammers_client::types::iter_buffer::InvocationError;
-use grammers_client::types::{Dialog, Message, Chat, MessageDeletion};
+use grammers_client::types::{Chat, Dialog, Message, MessageDeletion};
 use grammers_client::{Client, Update};
 use ratatui::{prelude::*, widgets::*};
 
-use tokio::sync::mpsc::{self, UnboundedSender, UnboundedReceiver};
 use screen::ScreenEvent;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 pub fn setup_panic_handler() {
     let original_hook = std::panic::take_hook();
@@ -20,27 +20,24 @@ pub fn setup_panic_handler() {
     }));
 }
 
-type Id = i64;
 
 /// Chat state
 struct View {
     dialog: Dialog,
-    messages: Vec<Message>,
+    messages_cache: Vec<Message>,
 }
 
 impl View {
     fn new(dialog: Dialog) -> View {
         View {
             dialog,
-            messages: Vec::new(),
+            messages_cache: Vec::new(),
         }
     }
 }
 
 struct App {
     quit: bool,
-    // dialogs: Vec<Dialog>,
-    // messages: Vec<Message>,
     views: Vec<View>,
     active_view: Option<usize>,
 }
@@ -49,8 +46,6 @@ impl App {
     fn new() -> Self {
         App {
             quit: false,
-            // dialogs: Vec::new(),
-            // messages: Vec::new(),
             views: Vec::new(),
             active_view: None,
         }
@@ -60,6 +55,8 @@ impl App {
 fn ui(frame: &mut Frame, app: &mut App) {
     let area = frame.size();
 
+    // TODO: scroll and stuff
+    //
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints(vec![Constraint::Min(0), Constraint::Max(3)])
@@ -73,27 +70,37 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let dialogs_widget = List::new(
         app.views
             .iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(i, c)| {
                 format!(
-                    "[{}]: {}",
+                    "{}[{}]: {}",
+                    if app.active_view == Some(i) { "*" } else { " " },
                     c.dialog.chat().name(),
-                    c.dialog.last_message.as_ref().map(|m| m.text()).unwrap_or("")
+                    c.dialog
+                        .last_message
+                        .as_ref()
+                        .map(|m| m.text())
+                        .unwrap_or("")
                 )
             })
             .map(Line::from),
     )
     .block(Block::default().borders(Borders::ALL));
 
-    let active_chat_widget = List::new(
-        app.views[0].messages
-            .iter()
-            .map(|m| {
-                m.text()
-            })
-            .map(Line::from),
-    )
-        .direction(ListDirection::BottomToTop)
-        .block(Block::default().borders(Borders::ALL));
+    let active_chat_widget = if let Some(idx) = app.active_view {
+        List::new(
+            app.views
+                .get(idx).unwrap()
+                .messages_cache
+                .iter()
+                .map(|m| m.text())
+                .map(Line::from)
+        )
+    } else {
+            List::default()
+    }
+    .direction(ListDirection::BottomToTop)
+    .block(Block::default().borders(Borders::ALL));
 
     let status_view =
         Paragraph::new(Line::from("tg9 v0.1")).block(Block::new().borders(Borders::ALL));
@@ -114,15 +121,21 @@ enum ApiJob {
 }
 
 /// Perform API calls requested by application actions
-async fn api_worker(client: Client, mut rx: UnboundedReceiver<ApiJob>, tx: UnboundedSender<ApiEvent>) {
+async fn api_worker(
+    client: Client,
+    mut rx: UnboundedReceiver<ApiJob>,
+    tx: UnboundedSender<ApiEvent>,
+) {
     loop {
-        let job = rx.recv().await.unwrap();
+        let Some(job) = rx.recv().await else { break; };
+        let tx = tx.clone();
+        let client = client.clone();
         tokio::spawn(async move {
             match job {
                 ApiJob::LoadDialogs => {
                     let mut dialogs = client.iter_dialogs();
                     while let Some(dialog) = dialogs.next().await.unwrap() {
-                        tx.send(ApiEvent::LoadMessages(()))
+                        tx.send(ApiEvent::LoadedDialog(dialog)).unwrap();
                     }
                 }
                 ApiJob::LoadMessages => {
@@ -141,10 +154,9 @@ async fn receive_api_updates(client: Client, tx: UnboundedSender<ApiEvent>) {
     while let Some(update) = client.next_update().await.unwrap() {
         match update {
             Update::NewMessage(message) if !message.outgoing() => {
-                tx.send(ApiEvent::Message(message)).unwrap();
+                tx.send(ApiEvent::MessageNew(message)).unwrap();
             }
-            Update::MessageDeleted(_message_del) => {
-            }
+            Update::MessageDeleted(_message_del) => {}
             Update::MessageEdited(_message) => {}
             _ => {}
         }
@@ -154,43 +166,59 @@ async fn receive_api_updates(client: Client, tx: UnboundedSender<ApiEvent>) {
 /// Events that update state from API messages
 #[derive(Debug)]
 enum ApiEvent {
-    Message(Message),
-    DeleteMessage(MessageDeletion),
-    EditMessage(Message),
-    LoadMessages(_),
-    LoadDialogs(_),
-    Error(_),
+    /// new message
+    MessageNew(Message),
+
+    MessageDeleted(MessageDeletion),
+
+    MessageEdited(Message),
+
+    /// load a part of messages in chat
+    LoadedMessages(Message),
+
+    /// initial loading of dialogs
+    LoadedDialog(Dialog),
+
+    /// error invoking API
+    Error(),
 }
 
 async fn run() -> Result<()> {
     // TODO: provide login data from tui
     let client = api::login().await?;
 
-    let (mut api_tx, mut api_rx) = mpsc::unbounded_channel();
+    let (api_tx, mut api_rx) = mpsc::unbounded_channel();
 
-    let (mut api_job_tx, mut api_job_rx) = mpsc::unbounded_channel();
+    let (api_job_tx, api_job_rx) = mpsc::unbounded_channel();
 
-    tokio::spawn(async move {
-        api_worker(client.clone(), api_job_rx, api_tx.clone()).await;
+    tokio::spawn({
+        let api_tx = api_tx.clone();
+        let client = client.clone();
+        async move {
+            api_worker(client, api_job_rx, api_tx).await;
+        }
     });
 
-    let (mut screen_tx, mut screen_rx) = mpsc::unbounded_channel();
+    let (screen_tx, mut screen_rx) = mpsc::unbounded_channel();
     let mut screen = screen::Screen::new(screen_tx.clone()).unwrap();
     screen.enter()?;
 
     let mut app = App::new();
 
-    tokio::spawn(async move {
-        receive_api_updates(client.clone(), api_tx.clone()).await;
+    tokio::spawn({
+        let api_tx = api_tx.clone();
+        let client = client.clone();
+        async move {
+            receive_api_updates(client, api_tx).await;
+        }
     });
 
-    api_job_tx.send(ApiJob::LoadDialogs);
+    api_job_tx.send(ApiJob::LoadDialogs).unwrap();
 
     loop {
         tokio::select! {
-            Some(e) = screen_rx.recv() => { 
+            Some(e) = screen_rx.recv() => {
                 match e {
-                    ScreenEvent::Quit => {},
                     ScreenEvent::Tick => {},
                     ScreenEvent::Render => {},
 
@@ -221,11 +249,21 @@ async fn run() -> Result<()> {
 
             Some(api_event) = api_rx.recv() => {
                 match api_event {
-                    ApiEvent::Message(_message) => {
+                    ApiEvent::LoadedDialog(dialog) => {
+                        let view = View::new(dialog);
+                        // api_job_tx.send(ApiJob::LoadMessages)
+                        app.views.push(view);
                     }
-                    ApiEvent::LoadMessages(_) => {
+                    ApiEvent::LoadedMessages(_message) => {
+
                     }
-                    ApiEvent::Error(_) => {
+                    ApiEvent::MessageNew(_message) => {
+                    }
+                    ApiEvent::MessageDeleted(_deleted) => {
+                    }
+                    ApiEvent::MessageEdited(_message) => {
+                    }
+                    ApiEvent::Error() => {
                     }
                 }
             }
