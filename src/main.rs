@@ -11,27 +11,26 @@ use grammers_session::PackedChat;
 use ratatui::{prelude::*, widgets::*};
 use tokio::sync::mpsc;
 use std::cmp;
+use std::collections::VecDeque;
 
 
-
-/// Chat state
-struct View {
+struct ChatState {
     dialog: Dialog,
-    messages_cache: Vec<Message>,
+    messages: VecDeque<Message>,
 }
 
-impl View {
-    fn new(dialog: Dialog) -> View {
-        View {
+impl ChatState {
+    fn new(dialog: Dialog) -> ChatState {
+        ChatState {
             dialog,
-            messages_cache: Vec::new(),
+            messages: VecDeque::new(),
         }
     }
 }
 
 struct App {
     quit: bool,
-    views: Vec<View>,
+    views: VecDeque<ChatState>,
     active_view: Option<usize>,
 }
 
@@ -39,7 +38,7 @@ impl App {
     fn new() -> Self {
         App {
             quit: false,
-            views: Vec::new(),
+            views: VecDeque::new(),
             active_view: None,
         }
     }
@@ -85,7 +84,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             app.views
                 .get(idx)
                 .unwrap()
-                .messages_cache
+                .messages
                 .iter()
                 .map(|m| m.text())
                 .map(Line::from),
@@ -126,28 +125,26 @@ async fn api_worker(
             let Some(job) = job else { break; };
             let tx = tx.clone();
             let client = client.clone();
-            tokio::spawn(async move {
-                match job {
-                    ApiJob::LoadDialogs => {
-                        let mut dialogs = client.iter_dialogs();
-                        while let Some(dialog) = dialogs.next().await.unwrap() {
-                            tx.send(ApiEvent::LoadedDialog(dialog)).unwrap();
-                        }
-                    }
-                    ApiJob::LoadMessages(c) => {
-                        // TODO: when scrolling up, load necessary messages. For now this is
-                        // just for initial loading of chats (and the view is not scrollable)
-
-                        let mut message_iter = client.iter_messages(c).limit(30);
-
-                        // let mut messages = Vec::new();
-                        while let Some(message) = message_iter.next().await.unwrap() {
-                            // messages.push(message);
-                            tx.send(ApiEvent::LoadedMessages(message)).unwrap();
-                        }
+            match job {
+                ApiJob::LoadDialogs => {
+                    let mut dialogs = client.iter_dialogs();
+                    while let Some(dialog) = dialogs.next().await.unwrap() {
+                        tx.send(ApiEvent::LoadedDialog(dialog)).unwrap();
                     }
                 }
-            });
+                ApiJob::LoadMessages(c) => {
+                    // TODO: when scrolling up, load necessary messages. For now this is
+                    // just for initial loading of chats (and the view is not scrollable)
+
+                    let mut message_iter = client.iter_messages(c).limit(30);
+
+                    // let mut messages = Vec::new();
+                    while let Some(message) = message_iter.next().await.unwrap() {
+                        // messages.push(message);
+                        tx.send(ApiEvent::LoadedMessages(message)).unwrap();
+                    }
+                }
+            }
         }
             update = client.next_update() => {
                 let Ok(update) = update else {
@@ -243,13 +240,13 @@ async fn run() -> Result<()> {
             Some(api_event) = api_rx.recv() => {
                 match api_event {
                     ApiEvent::LoadedDialog(dialog) => {
-                        let view = View::new(dialog);
+                        let view = ChatState::new(dialog);
                         app.views.push(view);
                     }
                     ApiEvent::LoadedMessages(message) => {
                         for v in app.views.iter_mut() {
                             if v.dialog.chat().pack() == message.chat().pack() {
-                                v.messages_cache.push(message);
+                                v.messages.push(message);
                                 break;
                             }
                         }
