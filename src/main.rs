@@ -1,5 +1,6 @@
 mod api;
 mod screen;
+mod ui;
 
 use screen::ScreenEvent;
 use anyhow::Result;
@@ -11,35 +12,39 @@ use grammers_session::PackedChat;
 use ratatui::{prelude::*, widgets::*};
 use tokio::sync::mpsc;
 use std::cmp;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 
 
 struct ChatState {
+    chat: PackedChat,
     dialog: Dialog,
     messages: VecDeque<Message>,
 }
 
 impl ChatState {
     fn new(dialog: Dialog) -> ChatState {
+        let chat = dialog.chat().pack();
         ChatState {
             dialog,
             messages: VecDeque::new(),
+            chat,
         }
     }
 }
 
 struct App {
     quit: bool,
-    views: VecDeque<ChatState>,
-    active_view: Option<usize>,
+    chat_states: VecDeque<ChatState>,
+    dialog_idx: Option<usize>,
+    // chat_idxs: HashMap<usize, Option<usize>>,
 }
 
 impl App {
     fn new() -> Self {
         App {
             quit: false,
-            views: VecDeque::new(),
-            active_view: None,
+            chat_states: VecDeque::new(),
+            dialog_idx: None,
         }
     }
 }
@@ -60,13 +65,13 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .split(layout[0]);
 
     let dialogs_widget = List::new(
-        app.views
+        app.chat_states
             .iter()
             .enumerate()
             .map(|(i, c)| {
                 format!(
                     "{}[{}]: {}",
-                    if app.active_view == Some(i) { "*" } else { " " },
+                    if app.dialog_idx == Some(i) { "*" } else { " " },
                     c.dialog.chat().name(),
                     c.dialog
                         .last_message
@@ -79,9 +84,9 @@ fn ui(frame: &mut Frame, app: &mut App) {
     )
     .block(Block::default().borders(Borders::ALL));
 
-    let active_chat_widget = if let Some(idx) = app.active_view {
+    let active_chat_widget = if let Some(idx) = app.dialog_idx {
         List::new(
-            app.views
+            app.chat_states
                 .get(idx)
                 .unwrap()
                 .messages
@@ -135,7 +140,6 @@ async fn api_worker(
                 ApiJob::LoadMessages(c) => {
                     // TODO: when scrolling up, load necessary messages. For now this is
                     // just for initial loading of chats (and the view is not scrollable)
-
                     let mut message_iter = client.iter_messages(c).limit(30);
 
                     // let mut messages = Vec::new();
@@ -211,42 +215,48 @@ async fn run() -> Result<()> {
 
     loop {
         tokio::select! {
-            Some(e) = screen_rx.recv() => {
-                match e {
-                    ScreenEvent::Tick => {},
-                    ScreenEvent::Render => {},
+        Some(e) = screen_rx.recv() => {
+            match e {
+                ScreenEvent::Tick => {},
+                ScreenEvent::Render => {},
 
-                    ScreenEvent::Key(e) => {
-                        match (e.modifiers, e.code) {
-                            (KeyModifiers::NONE, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                                app.quit = true;
-                            }
-                            (KeyModifiers::NONE, KeyCode::Char('j')) => {
-                                let idx = cmp::min(app.active_view.unwrap_or(0) + 1, app.views.len()-1);
-                                app.active_view = Some(idx);
-                                let chat = app.views[idx].dialog.chat().pack();
-                                api_job_tx.send(ApiJob::LoadMessages(chat)).unwrap();
-                            }
-                            (KeyModifiers::NONE, KeyCode::Char('k')) => {
-                            }
-                            _ => {}
+                ScreenEvent::Key(e) => {
+                    match (e.modifiers, e.code) {
+                        (KeyModifiers::NONE, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                            app.quit = true;
                         }
-                    },
-                    ScreenEvent::Quit => app.quit = true,
-                    _ => {}
-                }
+                        (KeyModifiers::NONE, KeyCode::Char('j')) => {
+                            if app.chat_states.is_empty() { continue; } 
+                            let idx = cmp::min(app.dialog_idx.map(|i| i+1).unwrap_or(0), app.chat_states.len()-1);
+                            app.dialog_idx = Some(idx);
+                            let c = app.chat_states[idx].chat;
+                            api_job_tx.send(ApiJob::LoadMessages(c)).unwrap();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('k')) => {
+                            if app.chat_states.is_empty() { continue; } 
+                            let idx = cmp::max(app.dialog_idx.map(|i| i-1).unwrap_or(0), 0);
+                            app.dialog_idx = Some(idx);
+                            let chat = app.chat_states[idx].chat;
+                            api_job_tx.send(ApiJob::LoadMessages(chat)).unwrap();
+                        }
+                        _ => {}
+                    }
+                },
+                ScreenEvent::Quit => app.quit = true,
+                _ => {}
             }
+        }
 
             Some(api_event) = api_rx.recv() => {
                 match api_event {
                     ApiEvent::LoadedDialog(dialog) => {
-                        let view = ChatState::new(dialog);
-                        app.views.push(view);
+                        let chat_state = ChatState::new(dialog);
+                        app.chat_states.push_back(chat_state);
                     }
                     ApiEvent::LoadedMessages(message) => {
-                        for v in app.views.iter_mut() {
-                            if v.dialog.chat().pack() == message.chat().pack() {
-                                v.messages.push(message);
+                        for v in app.chat_states.iter_mut() {
+                            if v.chat == message.chat().into() {
+                                v.messages.push_back(message);
                                 break;
                             }
                         }
